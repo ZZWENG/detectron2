@@ -131,6 +131,7 @@ class ROIHeads(torch.nn.Module):
     def __init__(self, cfg, input_shape: Dict[str, ShapeSpec]):
         super(ROIHeads, self).__init__()
         # fmt: off
+        self.cfg = cfg
         self.batch_size_per_image     = cfg.MODEL.ROI_HEADS.BATCH_SIZE_PER_IMAGE
         self.positive_sample_fraction = cfg.MODEL.ROI_HEADS.POSITIVE_FRACTION
         self.in_features              = cfg.MODEL.ROI_HEADS.IN_FEATURES
@@ -560,11 +561,30 @@ class StandardROIHeads(ROIHeads):
             losses.update(self._forward_keypoint(features, proposals))
             return proposals, losses
         else:
-            pred_instances = self._forward_box(features, proposals)
-            # During inference cascaded prediction is used: the mask and keypoints heads are only
-            # applied to the top scoring box detections.
-            pred_instances = self.forward_with_given_boxes(features, pred_instances)
+            if self.cfg.MODEL.ROI_MASK_HEAD.CLS_AGNOSTIC_MASK:
+                pred_instances = self.forward_ca_mask(features, proposals)
+            else:
+                pred_instances = self._forward_box(features, proposals)
+                # During inference cascaded prediction is used: the mask and keypoints heads are only
+                # applied to the top scoring box detections.
+                pred_instances = self.forward_with_given_boxes(features, pred_instances)
             return pred_instances, {}
+
+    def forward_ca_mask(
+        self, features: Dict[str, torch.Tensor], proposals: List[Instances]
+    ) -> List[Instances]:
+        assert not self.training
+        start, end = 0, len(proposals[0])
+        proposals = [proposals[0][start:end]]
+        features = [features[f] for f in self.in_features]
+        
+        proposal_boxes = [x.proposal_boxes for x in proposals]
+        mask_features = self.mask_pooler(features, proposal_boxes)
+        nums = end - start
+        proposals[0].pred_classes = torch.zeros(nums).to(dtype=torch.long)
+        proposals[0].pred_boxes = proposals[0].proposal_boxes
+        proposals[0].scores = torch.tensor(np.linspace(1, 0.5, nums)).to(dtype=torch.float)
+        return self.mask_head(mask_features, proposals)
 
     def forward_with_given_boxes(
         self, features: Dict[str, torch.Tensor], instances: List[Instances]
